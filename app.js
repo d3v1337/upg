@@ -72,6 +72,7 @@ function easeOutQuint(t) { return 1 - Math.pow(1 - t, 5); }
 
 function showToast(msg, danger = false) {
   const el = $('#toast');
+  if (!el) return;
   el.textContent = msg;
   el.classList.toggle('danger', danger);
   el.classList.add('show');
@@ -106,20 +107,25 @@ async function loadCatalog() {
       items = items.concat(mapStickersData(stickersRes.value));
     }
 
-    // Обогащаем предметы динамическими ценами из базы CSPriceAPI
-    if (pricesRes.status === 'fulfilled' && pricesRes.value) {
-      const priceDict = pricesRes.value;
-      
+    // Безопасное обогащение ценами из базы CSPriceAPI / ByMykel API
+    if (pricesRes.status === 'fulfilled' && pricesRes.value && typeof pricesRes.value === 'object') {
+      const priceData = pricesRes.value;
       items.forEach(item => {
-        const priceData = priceDict[item.id] || priceDict[item.name];
-        if (priceData) {
-          const rawUsd = typeof priceData === 'number' 
-            ? priceData 
-            : (priceData.steam || priceData.price || 0);
-
-          if (rawUsd > 0) {
-            item.value = Math.max(5, Math.round(rawUsd * 100)); // $1 = 100 P
+        try {
+          const entry = priceData[item.id] || priceData[item.name];
+          if (entry) {
+            let usdPrice = 0;
+            if (typeof entry === 'number') {
+              usdPrice = entry;
+            } else if (typeof entry === 'object') {
+              usdPrice = entry.steam || entry.price || entry.average || 0;
+            }
+            if (usdPrice > 0) {
+              item.value = Math.max(5, Math.round(usdPrice * 100)); // $1 = 100 P
+            }
           }
+        } catch (e) {
+          // В случае ошибки парсинга конкретной цены сохраняем базовую
         }
       });
     }
@@ -127,7 +133,7 @@ async function loadCatalog() {
     // отфильтровать без изображений/цены
     items = items.filter(it => it.image && it.value > 0);
 
-    if (items.length < 30) {
+    if (items.length < 10) {
       throw new Error('Слишком мало предметов получено из API');
     }
 
