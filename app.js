@@ -22,9 +22,8 @@ const CONFIG = {
   STORAGE_KEY: 'peria_upgrade_v1',
   CURRENCY_LABEL: 'пер',
   DATA_SOURCES: {
-    skins: 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins_not_grouped.json',
-    stickers: 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/stickers.json',
-    prices: 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/prices.json',
+    // Используем открытую независимую базу CS2 скинов с готовыми картинками и ценниками
+    catalog: 'https://raw.githubusercontent.com/Ansimov/cs2-schema/main/static/skins.json',
   },
 };
 
@@ -81,7 +80,7 @@ function showToast(msg, danger = false) {
 }
 
 /* ---------------------------------------------------------
-   2. DATA LOADING (CS2 skins/knives/stickers + CS2 Market Prices)
+   2. DATA LOADING (Без Steam API и Без ByMykel)
 --------------------------------------------------------- */
 const FALLBACK_ITEMS = buildFallbackItems();
 
@@ -92,58 +91,62 @@ const Catalog = {
 
 async function loadCatalog() {
   try {
-    const [skinsRes, stickersRes, pricesRes] = await Promise.allSettled([
-      fetchJsonWithTimeout(CONFIG.DATA_SOURCES.skins, 9000),
-      fetchJsonWithTimeout(CONFIG.DATA_SOURCES.stickers, 9000),
-      fetchJsonWithTimeout(CONFIG.DATA_SOURCES.prices, 9000),
-    ]);
+    const rawData = await fetchJsonWithTimeout(CONFIG.DATA_SOURCES.catalog, 9000);
 
-    let items = [];
-
-    if (skinsRes.status === 'fulfilled' && Array.isArray(skinsRes.value)) {
-      items = items.concat(mapSkinsData(skinsRes.value));
-    }
-    if (stickersRes.status === 'fulfilled' && Array.isArray(stickersRes.value)) {
-      items = items.concat(mapStickersData(stickersRes.value));
+    if (!Array.isArray(rawData)) {
+      throw new Error('Некорректный формат данных каталога');
     }
 
-    // Безопасное обогащение ценами из базы CSPriceAPI / ByMykel API
-    if (pricesRes.status === 'fulfilled' && pricesRes.value && typeof pricesRes.value === 'object') {
-      const priceData = pricesRes.value;
-      items.forEach(item => {
-        try {
-          const entry = priceData[item.id] || priceData[item.name];
-          if (entry) {
-            let usdPrice = 0;
-            if (typeof entry === 'number') {
-              usdPrice = entry;
-            } else if (typeof entry === 'object') {
-              usdPrice = entry.steam || entry.price || entry.average || 0;
-            }
-            if (usdPrice > 0) {
-              item.value = Math.max(5, Math.round(usdPrice * 100)); // $1 = 100 P
-            }
-          }
-        } catch (e) {
-          // В случае ошибки парсинга конкретной цены сохраняем базовую
-        }
-      });
-    }
+    let items = mapCatalogData(rawData);
 
-    // отфильтровать без изображений/цены
+    // фильтруем только валидные предметы с картинками и ценниками
     items = items.filter(it => it.image && it.value > 0);
 
     if (items.length < 10) {
-      throw new Error('Слишком мало предметов получено из API');
+      throw new Error('Получено слишком мало скинов');
     }
 
     Catalog.all = dedupeById(items);
     Catalog.loaded = true;
   } catch (err) {
-    console.warn('Не удалось загрузить каталог CS2, используем локальный набор:', err);
+    console.warn('Не удалось загрузить альтернативный каталог CS2, включаем резервный набор:', err);
     Catalog.all = FALLBACK_ITEMS;
     Catalog.loaded = true;
   }
+}
+
+function mapCatalogData(raw) {
+  return raw.map((s, idx) => {
+    const rarityName = s.rarity || 'Consumer Grade';
+    const rarity = rarityInfo(rarityName);
+    const skinName = s.name || 'CS2 Item';
+    
+    const isKnife = /^(★|Karambit|Bayonet|Butterfly|Talon|Skeleton|Bowie|Falchion|Flip|Gut|Huntsman|Navaja|Nomad|Paracord|Shadow Daggers|Stiletto|Survival|Ursus|Classic Knife)/i.test(skinName)
+      || s.category === 'knife';
+      
+    const category = isKnife ? 'knife' : (s.category || 'skin');
+    
+    // Если в базе есть средняя рыночная цена (в USD) — конвертируем в перы, иначе генерируем
+    const usdPrice = parseFloat(s.price || s.suggested_price || 0);
+    const value = usdPrice > 0 
+      ? Math.round(usdPrice * 100) 
+      : seededValue('item-' + idx, rarity.order, skinName.includes('StatTrak™'), skinName.includes('Souvenir'));
+
+    return {
+      id: s.id || ('cs2-' + idx),
+      name: skinName,
+      shortName: skinName.split('|').pop().replace(/\(.*\)/, '').trim(),
+      image: s.image || s.icon_url,
+      rarityName: rarityName,
+      rarityKey: isKnife ? 'covert' : rarity.key,
+      rarityColor: isKnife ? '#eb4b4b' : rarity.color,
+      rarityOrder: isKnife ? 6 : rarity.order,
+      category,
+      value: isKnife ? Math.max(value, 900) : value,
+      stattrak: skinName.includes('StatTrak™'),
+      souvenir: skinName.includes('Souvenir'),
+    };
+  });
 }
 
 function dedupeById(items) {
@@ -183,79 +186,23 @@ function seededValue(id, rarityOrder, stattrak, souvenir) {
   return Math.max(4, Math.round(value));
 }
 
-function mapSkinsData(raw) {
-  return raw.map(s => {
-    const rarityName = s.rarity && s.rarity.name;
-    const rarity = rarityInfo(rarityName);
-    const weaponName = s.weapon && s.weapon.name ? s.weapon.name : '';
-    const skinName = s.name || weaponName;
-    const isKnife = /^(★|Karambit|Bayonet|Butterfly|Talon|Skeleton|Bowie|Falchion|Flip|Gut|Huntsman|Navaja|Nomad|Paracord|Shadow Daggers|Stiletto|Survival|Ursus|Classic Knife)/i.test(weaponName)
-      || (s.category && /knife/i.test(s.category.name || ''));
-    const category = isKnife ? 'knife' : 'skin';
-    const value = seededValue(s.id, rarity.order, !!s.stattrak, !!s.souvenir);
-    return {
-      id: s.id,
-      name: skinName,
-      shortName: (s.paint_index !== undefined && s.name) ? s.name.split('|').pop().replace(/\(.*\)/, '').trim() : skinName,
-      image: s.image,
-      rarityName: rarityName || 'Consumer Grade',
-      rarityKey: isKnife ? 'covert' : rarity.key,
-      rarityColor: isKnife ? '#eb4b4b' : rarity.color,
-      rarityOrder: isKnife ? 6 : rarity.order,
-      category,
-      value: isKnife ? Math.max(value, 900) : value,
-      stattrak: !!s.stattrak,
-      souvenir: !!s.souvenir,
-    };
-  });
-}
-
-function mapStickersData(raw) {
-  return raw.map(s => {
-    const rarityName = s.rarity && s.rarity.name;
-    const rarity = rarityInfo(rarityName);
-    const value = seededValue(s.id, rarity.order, false, false);
-    return {
-      id: s.id,
-      name: s.name,
-      shortName: s.name,
-      image: s.image,
-      rarityName: rarityName || 'Consumer Grade',
-      rarityKey: rarity.key,
-      rarityColor: rarity.color,
-      rarityOrder: rarity.order,
-      category: 'sticker',
-      value: Math.max(3, Math.round(value * 0.5)),
-      stattrak: false,
-      souvenir: false,
-    };
-  });
-}
-
 function buildFallbackItems() {
-  const RAW_BASE = 'https://raw.githubusercontent.com/ByMykel/counter-strike-image-tracker/main/static/panorama/images/econ/default_generated/';
+  const RAW_BASE = 'https://community.cloudflare.steamstatic.com/economy/image/';
   const defs = [
-    ['AK-47 | Redline', 'weapon_ak47_cu_ak47_cobra_light_png.png', 'Classified', 'skin'],
-    ['AWP | Asiimov', 'weapon_awp_cu_medieval_snakebite_light_png.png', 'Covert', 'skin'],
-    ['M4A4 | Howl', 'weapon_m4a1_cu_m4a1_hades_light_png.png', 'Contraband', 'skin'],
-    ['Desert Eagle | Blaze', 'weapon_deagle_am_deagle_light_png.png', 'Restricted', 'skin'],
-    ['Glock-18 | Fade', 'weapon_glock_am_fade_light_png.png', 'Restricted', 'skin'],
-    ['USP-S | Kill Confirmed', 'weapon_usp_cu_usp_ivory_light_png.png', 'Covert', 'skin'],
-    ['P250 | Sand Dune', 'weapon_p250_hy_p250_marbleized_light_png.png', 'Consumer Grade', 'skin'],
-    ['MP7 | Nemesis', 'weapon_mp7_cu_mp7_hive_light_png.png', 'Restricted', 'skin'],
-    ['Karambit | Doppler', 'weapon_karambit_am_ossify_knife_light_png.png', 'Covert', 'knife'],
-    ['Butterfly Knife | Fade', 'weapon_knife_butterfly_am_fade_light_png.png', 'Covert', 'knife'],
-    ['Five-SeveN | Case Hardened', 'weapon_fiveseven_cu_fiveseven_case_hardened_light_png.png', 'Classified', 'skin'],
-    ['Galil AR | Chatterbox', 'weapon_galilar_cu_galil_flashwarning_light_png.png', 'Classified', 'skin'],
+    ['AK-47 | Redline', '-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot7HxfDhjxszJemkV08ykmom0mH7IMrXUglR54pp53-vC99ij0Aew_RBtZ2D2I4eTd1A2ZwnR_1O2kunrhJK4vdTYm3Rk7yNw7S3azQv310Meb-c43z4', 'Classified', 'skin'],
+    ['AWP | Asiimov', '-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot621FAR17PLfYQJD_9W7m5a0mvLwO77UqWdY781lxOiS99T20A23qRBsYWD2coKQJQ43N1_R-1O7wOi905S0vZ_KySBi6Sdz4C7D30vgAydI19E', 'Covert', 'skin'],
+    ['M4A4 | Howl', '-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpou-6kejhz2v_Nfz5H_uO1gb-Gw_alIITBhGJf_NZlmOzA-LP5gVO8v11rNmyiLIPBclI8MwqGrFS5wL25g5e7vJ2YzCFq6SR25yvczAv33080awX9_Q', 'Contraband', 'skin'],
+    ['Desert Eagle | Blaze', '-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgposbaqKAxf0v73djxP79S3m4GIhew3O4Tck39I54p03O3E94mjjQTg80M4Zz2mItCdegFvN1yGqFO-x-_rhpK46Jydm3Nru3U8pLHF21asUw', 'Restricted', 'skin'],
+    ['Karambit | Doppler', '-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpovbSsLQJf1fLEcjVL49KJlY20k_jkI7fUhFRB4sp0i_2Xp9yhi1WxrhA4NT31IYeWclBvaArTrFS3wbvq0cO045v3_XIn4I50', 'Covert', 'knife'],
   ];
-  return defs.map(([name, img, rarityName, category], idx) => {
+  return defs.map(([name, imgHash, rarityName, category], idx) => {
     const rarity = rarityInfo(rarityName);
     const isKnife = category === 'knife';
     return {
       id: 'fallback-' + idx,
       name,
       shortName: name.split('|').pop().trim(),
-      image: RAW_BASE + img,
+      image: RAW_BASE + imgHash,
       rarityName,
       rarityKey: isKnife ? 'covert' : rarity.key,
       rarityColor: isKnife ? '#eb4b4b' : rarity.color,
