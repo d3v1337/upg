@@ -24,6 +24,7 @@ const CONFIG = {
   DATA_SOURCES: {
     skins: 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins_not_grouped.json',
     stickers: 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/stickers.json',
+    prices: 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/prices.json',
   },
 };
 
@@ -31,15 +32,15 @@ const CONFIG = {
 const RARITY_MAP = {
   'Consumer Grade':        { key: 'consumer',    color: '#b0c3d9', order: 1 },
   'Industrial Grade':      { key: 'industrial',  color: '#5e98d9', order: 2 },
-  'Mil-Spec Grade':        { key: 'milspec',      color: '#4b69ff', order: 3 },
+  'Mil-Spec Grade':        { key: 'milspec',     color: '#4b69ff', order: 3 },
   'Restricted':            { key: 'restricted',  color: '#8847ff', order: 4 },
   'Classified':            { key: 'classified',  color: '#d32ce6', order: 5 },
-  'Covert':                { key: 'covert',       color: '#eb4b4b', order: 6 },
+  'Covert':                { key: 'covert',      color: '#eb4b4b', order: 6 },
   'Contraband':            { key: 'contraband',  color: '#e4ae39', order: 7 },
-  'Extraordinary':         { key: 'gold',         color: '#e4ae39', order: 8 },
+  'Extraordinary':         { key: 'gold',        color: '#e4ae39', order: 8 },
   'High Grade':            { key: 'restricted',  color: '#8847ff', order: 4 },
   'Remarkable':            { key: 'classified',  color: '#d32ce6', order: 5 },
-  'Exotic':                { key: 'covert',       color: '#eb4b4b', order: 6 },
+  'Exotic':                { key: 'covert',      color: '#eb4b4b', order: 6 },
   'Base Grade':            { key: 'consumer',    color: '#b0c3d9', order: 1 },
 };
 const DEFAULT_RARITY = { key: 'consumer', color: '#8a919e', order: 1 };
@@ -79,8 +80,7 @@ function showToast(msg, danger = false) {
 }
 
 /* ---------------------------------------------------------
-   2. DATA LOADING (CS2 skins/knives/stickers via public JSON API,
-      images served directly from source — no keys required)
+   2. DATA LOADING (CS2 skins/knives/stickers + CS2 Market Prices)
 --------------------------------------------------------- */
 const FALLBACK_ITEMS = buildFallbackItems();
 
@@ -91,9 +91,10 @@ const Catalog = {
 
 async function loadCatalog() {
   try {
-    const [skinsRes, stickersRes] = await Promise.allSettled([
+    const [skinsRes, stickersRes, pricesRes] = await Promise.allSettled([
       fetchJsonWithTimeout(CONFIG.DATA_SOURCES.skins, 9000),
       fetchJsonWithTimeout(CONFIG.DATA_SOURCES.stickers, 9000),
+      fetchJsonWithTimeout(CONFIG.DATA_SOURCES.prices, 9000),
     ]);
 
     let items = [];
@@ -103,6 +104,24 @@ async function loadCatalog() {
     }
     if (stickersRes.status === 'fulfilled' && Array.isArray(stickersRes.value)) {
       items = items.concat(mapStickersData(stickersRes.value));
+    }
+
+    // Обогащаем предметы динамическими ценами из базы CSPriceAPI
+    if (pricesRes.status === 'fulfilled' && pricesRes.value) {
+      const priceDict = pricesRes.value;
+      
+      items.forEach(item => {
+        const priceData = priceDict[item.id] || priceDict[item.name];
+        if (priceData) {
+          const rawUsd = typeof priceData === 'number' 
+            ? priceData 
+            : (priceData.steam || priceData.price || 0);
+
+          if (rawUsd > 0) {
+            item.value = Math.max(5, Math.round(rawUsd * 100)); // $1 = 100 P
+          }
+        }
+      });
     }
 
     // отфильтровать без изображений/цены
@@ -144,9 +163,6 @@ async function fetchJsonWithTimeout(url, timeoutMs) {
   }
 }
 
-// Псевдо-цена: у публичного API нет реальных цен, поэтому генерируем
-// стабильную (детерминированную по id) условную стоимость в перах,
-// основанную на редкости + StatTrak/souvenir модификаторах.
 function seededValue(id, rarityOrder, stattrak, souvenir) {
   let hash = 0;
   for (let i = 0; i < id.length; i++) {
@@ -210,9 +226,6 @@ function mapStickersData(raw) {
   });
 }
 
-// Небольшой локальный резервный датасет (используется только если сеть
-// недоступна или API не отвечает) — картинки берутся из общедоступного
-// зеркала того же датасета CS2, чтобы UI не оставался пустым.
 function buildFallbackItems() {
   const RAW_BASE = 'https://raw.githubusercontent.com/ByMykel/counter-strike-image-tracker/main/static/panorama/images/econ/default_generated/';
   const defs = [
